@@ -1,5 +1,7 @@
 package com.fdeng.sdkhelper.views
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.os.Bundle
 import android.widget.Button
 import androidx.activity.enableEdgeToEdge
@@ -8,7 +10,15 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.fdeng.sdkhelper.R
 import com.fdeng.sdkhelper.logging.SdkLogger
+import android.os.Build
+import android.widget.Toast
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
+
 class MainActivity : AppCompatActivity() {
+    companion object {
+        private const val REQUEST_CODE_WRITE_EXTERNAL = 1001
+    }
 	override fun onCreate(savedInstanceState: Bundle?) {
 		super.onCreate(savedInstanceState)
 		enableEdgeToEdge()
@@ -35,8 +45,18 @@ class MainActivity : AppCompatActivity() {
 		}
 
 		button2.setOnClickListener {
-			// Code to execute when button2 is clicked
-			SdkLogger.exportToExternal(this@MainActivity)
+			SdkLogger.requestAndExportPublicLogs(this@MainActivity) { success, file ->
+				if (success) {
+					Toast.makeText(this, "Logs saved to ${file?.absolutePath}", Toast.LENGTH_LONG)
+						.show()
+				} else {
+					Toast.makeText(
+						this,
+						"Log export failed or permission denied",
+						Toast.LENGTH_LONG
+					).show()
+				}
+			}
 		}
 
 		button3.setOnClickListener {
@@ -49,4 +69,15 @@ class MainActivity : AppCompatActivity() {
 			SdkLogger.shutdown()
 		}
 	}
+
+	override fun onRequestPermissionsResult(
+		requestCode: Int,
+		permissions: Array<out String>,
+		grantResults: IntArray
+	) {
+		super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+		SdkLogger.onRequestPermissionsResult(requestCode, permissions, grantResults, this)
+	}
+
+
 }

@@ -1,7 +1,10 @@
 package com.fdeng.sdkhelper.logging
 
+import android.Manifest
+import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Environment
 import android.util.Log
 import androidx.core.content.FileProvider
@@ -11,6 +14,9 @@ import java.text.SimpleDateFormat
 import java.util.*
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+import android.os.Build
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 
 object SdkLogger {
 
@@ -246,6 +252,99 @@ object SdkLogger {
 		} catch (e: IOException) {
 			Log.e(logTag, "Failed to zip logs", e)
 			return null
+		}
+	}
+
+	fun exportToExternalZippedPublic(context: Context): File? {
+		val logFiles = logDir?.listFiles { _, name ->
+			name.startsWith("sdk_log_") && name.endsWith(".txt")
+		} ?: return null
+
+		if (logFiles.isEmpty()) return null
+
+		val timeStamp = System.currentTimeMillis()
+		val zipFileName = "sdk_logs_$timeStamp.zip"
+		val sdkFolderName = "YourSdkLogs"
+
+		return try {
+			val outFile: File = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+				// Scoped storage: Downloads/YourSdkLogs/sdk_logs_*.zip
+				val downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+				val dir = File(downloads, sdkFolderName).apply { mkdirs() }
+				File(dir, zipFileName)
+			} else {
+				// Legacy public access (pre-Q)
+				val downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+				val dir = File(downloads, sdkFolderName).apply { mkdirs() }
+				File(dir, zipFileName)
+			}
+
+			ZipOutputStream(BufferedOutputStream(FileOutputStream(outFile))).use { out ->
+				logFiles.forEach { file ->
+					FileInputStream(file).use { input ->
+						val entry = ZipEntry(file.name)
+						out.putNextEntry(entry)
+						input.copyTo(out)
+						out.closeEntry()
+					}
+				}
+			}
+
+			Log.i(logTag, "Zipped logs to: ${outFile.absolutePath}")
+			outFile
+		} catch (e: IOException) {
+			Log.e(logTag, "Failed to zip/export logs to shared storage", e)
+			null
+		}
+	}
+
+	private const val REQUEST_CODE_EXPORT_LOGS = 1727
+
+	private var exportCallback: ((success: Boolean, file: File?) -> Unit)? = null
+
+	fun requestAndExportPublicLogs(
+		activity: Activity,
+		callback: (success: Boolean, file: File?) -> Unit
+	) {
+		exportCallback = callback
+
+		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+			// No permission needed
+			val result = exportToExternalZippedPublic(activity)
+			callback(result != null, result)
+		} else {
+			if (ContextCompat.checkSelfPermission(
+					activity,
+					Manifest.permission.WRITE_EXTERNAL_STORAGE
+				) == PackageManager.PERMISSION_GRANTED
+			) {
+				val result = exportToExternalZippedPublic(activity)
+				callback(result != null, result)
+			} else {
+				ActivityCompat.requestPermissions(
+					activity,
+					arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE),
+					REQUEST_CODE_EXPORT_LOGS
+				)
+			}
+		}
+	}
+
+	// Must be forwarded from Activity
+	fun onRequestPermissionsResult(
+		requestCode: Int,
+		permissions: Array<out String>,
+		grantResults: IntArray,
+		context: Context
+	) {
+		if (requestCode == REQUEST_CODE_EXPORT_LOGS) {
+			if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+				val result = exportToExternalZippedPublic(context)
+				exportCallback?.invoke(result != null, result)
+			} else {
+				exportCallback?.invoke(false, null)
+			}
+			exportCallback = null
 		}
 	}
 
