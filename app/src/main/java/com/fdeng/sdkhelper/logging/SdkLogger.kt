@@ -5,8 +5,11 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Environment
 import android.util.Log
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import kotlinx.coroutines.*
 import java.io.*
@@ -14,59 +17,60 @@ import java.text.SimpleDateFormat
 import java.util.*
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
-import android.os.Build
-import androidx.core.app.ActivityCompat
-import androidx.core.content.ContextCompat
 
+/**
+ * Centralized logger for SDK operations:
+ * - Console logging with levels
+ * - Optional file logging with daily rotation
+ * - Log export and sharing
+ */
 object SdkLogger {
 
+	/** Supported log levels */
 	enum class Level { VERBOSE, DEBUG, INFO, WARN, ERROR, NONE }
 
+	/** Listener for custom log actions */
 	interface LogListener {
 		fun onLog(level: Level, tag: String, message: String)
 	}
 
+	// -- Configuration --
 	private const val DEFAULT_TAG = "YourSdk"
-	private var logTag: String = DEFAULT_TAG
-
+	private var logTag = DEFAULT_TAG
 	private var isInternalBuild = false
 	private var currentLevel = Level.WARN
-
 	private var listener: LogListener? = null
 
+	// -- File Logging --
 	private var isFileLoggingEnabled = false
 	private var logDir: File? = null
 	private var logFile: File? = null
 	private var bufferedWriter: BufferedWriter? = null
-
+	private var currentLogDate = ""
 	private val timestampFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
 	private val filenameDateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.US)
-
-	private var currentLogDate: String = ""
-
 	private val logScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-	// --- Public Config API ---
+	// -- Public Setup API --
 
-	fun setInternalBuild(isInternal: Boolean) {
-		isInternalBuild = isInternal
-	}
+	/** Enable/disable internal build log visibility */
+	fun setInternalBuild(isInternal: Boolean) { isInternalBuild = isInternal }
 
-	fun setLogLevel(level: Level) {
-		currentLevel = level
-	}
+	/** Set minimum log level for output */
+	fun setLogLevel(level: Level) { currentLevel = level }
 
-	fun setLogTag(tag: String) {
-		if (tag.isNotBlank()) logTag = tag
-	}
+	/** Set custom tag for log output */
+	fun setLogTag(tag: String) { if (tag.isNotBlank()) logTag = tag }
 
-	fun setLogListener(logListener: LogListener?) {
-		listener = logListener
-	}
+	/** Register/unregister a log listener */
+	fun setLogListener(logListener: LogListener?) { listener = logListener }
 
+	/**
+	 * Enable or disable file logging.
+	 * Creates log directory if enabling.
+	 */
 	fun enableFileLogging(context: Context, enable: Boolean) {
 		isFileLoggingEnabled = enable
-
 		if (enable) {
 			logDir = File(context.filesDir, "logs").apply { mkdirs() }
 			rotateLogFileIfNeeded()
@@ -75,7 +79,7 @@ object SdkLogger {
 		}
 	}
 
-	// --- Logging Methods ---
+	// -- Logging Methods --
 
 	fun v(message: String) = log(Level.VERBOSE, message)
 	fun d(message: String) = log(Level.DEBUG, message)
@@ -83,80 +87,75 @@ object SdkLogger {
 	fun w(message: String) = log(Level.WARN, message)
 	fun e(message: String) = log(Level.ERROR, message)
 
-	// --- Core Logging Logic ---
-
+	/**
+	 * Main logging function.
+	 * Writes to console and file (if enabled), and notifies listener.
+	 */
 	private fun log(level: Level, message: String) {
 		if (!shouldLog(level)) return
-
 		val formatted = formatMessage(level, message)
-
 		when (level) {
 			Level.VERBOSE -> Log.v(logTag, formatted)
-			Level.DEBUG -> Log.d(logTag, formatted)
-			Level.INFO -> Log.i(logTag, formatted)
-			Level.WARN -> Log.w(logTag, formatted)
-			Level.ERROR -> Log.e(logTag, formatted)
+			Level.DEBUG   -> Log.d(logTag, formatted)
+			Level.INFO    -> Log.i(logTag, formatted)
+			Level.WARN    -> Log.w(logTag, formatted)
+			Level.ERROR   -> Log.e(logTag, formatted)
 			else -> {}
 		}
-
-		if (isFileLoggingEnabled) {
-			writeToFileBuffered(formatted)
-		}
-
+		if (isFileLoggingEnabled) writeToFile(formatted)
 		listener?.onLog(level, logTag, message)
 	}
 
-	private fun shouldLog(level: Level): Boolean {
-		if (level == Level.VERBOSE && !isInternalBuild) return false
-		return level.ordinal >= currentLevel.ordinal && currentLevel != Level.NONE
-	}
+	/** True if the message should be logged at this level */
+	private fun shouldLog(level: Level): Boolean =
+		(level != Level.VERBOSE || isInternalBuild) &&
+				level.ordinal >= currentLevel.ordinal &&
+				currentLevel != Level.NONE
 
-	private fun formatMessage(level: Level, message: String): String {
-		val timestamp = timestampFormat.format(Date())
-		return "$timestamp [${level.name}] $message"
-	}
+	/** Formats log message with timestamp and level */
+	private fun formatMessage(level: Level, message: String) =
+		"${timestampFormat.format(Date())} [${level.name}] $message"
 
-	// --- Daily File Rotation ---
+	// -- File Logging Internals --
 
-	private fun rotateLogFileIfNeeded() {
-		logScope.launch {
-			val today = filenameDateFormat.format(Date())
-			if (today != currentLogDate || bufferedWriter == null) {
-				closeLogWriter()
-				currentLogDate = today
-				logFile = File(logDir, "sdk_log_$today.txt")
-				try {
-					bufferedWriter = BufferedWriter(FileWriter(logFile, true)).apply {
-						write("---- LOG STARTED ${timestampFormat.format(Date())} ----\n")
-						flush()
-					}
-				} catch (e: IOException) {
-					Log.e(logTag, "Failed to create new daily log file", e)
-				}
-			}
-		}
-	}
-
-	private fun writeToFileBuffered(message: String) {
-		logScope.launch {
+	/** Rotates daily log file if needed (runs in IO scope) */
+	private fun rotateLogFileIfNeeded() = logScope.launch {
+		val today = filenameDateFormat.format(Date())
+		if (today != currentLogDate || bufferedWriter == null) {
+			closeLogWriter()
+			currentLogDate = today
+			logFile = File(logDir, "sdk_log_$today.txt")
 			try {
-				rotateLogFileIfNeeded()
-				bufferedWriter?.apply {
-					write(message)
-					write("\n")
+				bufferedWriter = BufferedWriter(FileWriter(logFile, true)).apply {
+					write("---- LOG STARTED ${timestampFormat.format(Date())} ----\n")
+					flush()
 				}
 			} catch (e: IOException) {
-				Log.e(logTag, "BufferedWriter write failed", e)
-				restartWriter()
+				Log.e(logTag, "Failed to create daily log file", e)
 			}
 		}
 	}
 
+	/** Writes message to file (uses coroutine for IO) */
+	private fun writeToFile(message: String) = logScope.launch {
+		try {
+			rotateLogFileIfNeeded()
+			bufferedWriter?.apply {
+				write("$message\n")
+			}
+		} catch (e: IOException) {
+			Log.e(logTag, "File write failed", e)
+			restartWriter()
+		}
+	}
+
+	/** Restarts file writer, for error recovery */
 	private fun restartWriter() {
 		closeLogWriter()
 		rotateLogFileIfNeeded()
 	}
 
+	/** Closes the log writer gracefully */
 	private fun closeLogWriter() {
 		try {
 			bufferedWriter?.apply {
@@ -171,176 +170,115 @@ object SdkLogger {
 		}
 	}
 
-	fun flush() {
-		logScope.launch {
-			try {
-				bufferedWriter?.flush()
-			} catch (e: IOException) {
-				Log.e(logTag, "Failed to flush log", e)
-			}
-		}
+	/** Flushes log file output */
+	fun flush() = logScope.launch { try { bufferedWriter?.flush() } catch (_: IOException) {} }
+
+	/** Clears the current log file */
+	fun clearLogFile() = logScope.launch {
+		closeLogWriter()
+		logFile?.delete()
+		rotateLogFileIfNeeded()
 	}
 
-	fun clearLogFile() {
-		logScope.launch {
-			closeLogWriter()
-			logFile?.delete()
-			rotateLogFileIfNeeded()
-		}
-	}
-
+	/** Stops all logging and cancels IO scope */
 	fun shutdown() {
 		closeLogWriter()
 		logScope.cancel()
 	}
 
+	/** Returns current log file (if exists) */
 	fun getLogFile(): File? = logFile
 
+	// -- Export/Sharing Helpers --
+
+	/**
+	 * Copies all log files to external app-private documents directory.
+	 * @return List of exported log files (may be empty)
+	 */
 	fun exportToExternal(context: Context): List<File> {
-		val exportedFiles = mutableListOf<File>()
-
-		if (logDir == null) {
-			Log.w(logTag, "Log directory not initialized")
-			return emptyList()
-		}
-
-		val internalFiles = logDir?.listFiles { _, name ->
-			name.startsWith("sdk_log_") && name.endsWith(".txt")
-		} ?: return emptyList()
-
-		val externalDir = File(context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS), "YourSdkLogs")
-		if (!externalDir.exists()) externalDir.mkdirs()
-
-		internalFiles.forEach { file ->
+		val files = logDir?.listFiles { _, name -> name.startsWith("sdk_log_") && name.endsWith(".txt") } ?: return emptyList()
+		val externalDir = File(context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS), "YourSdkLogs").apply { mkdirs() }
+		return files.mapNotNull { file ->
 			try {
 				val outFile = File(externalDir, file.name)
 				file.copyTo(outFile, overwrite = true)
-				exportedFiles.add(outFile)
-			} catch (e: IOException) {
-				Log.e(logTag, "Failed to export log: ${file.name}", e)
-			}
+				outFile
+			} catch (_: IOException) { null }
 		}
-
-		return exportedFiles
 	}
 
+	/**
+	 * Zips all log files and exports to external app-private documents directory.
+	 * @return Zip file or null on error
+	 */
 	fun exportToExternalZipped(context: Context): File? {
-		val logFiles = logDir?.listFiles { _, name ->
-			name.startsWith("sdk_log_") && name.endsWith(".txt")
-		} ?: return null
-
+		val logFiles = logDir?.listFiles { _, name -> name.startsWith("sdk_log_") && name.endsWith(".txt") } ?: return null
 		if (logFiles.isEmpty()) return null
-
-		val externalDir = File(context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS), "YourSdkLogs")
-		if (!externalDir.exists()) externalDir.mkdirs()
-
+		val externalDir = File(context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS), "YourSdkLogs").apply { mkdirs() }
 		val zipFile = File(externalDir, "sdk_logs_${System.currentTimeMillis()}.zip")
-
-		try {
-			ZipOutputStream(BufferedOutputStream(FileOutputStream(zipFile))).use { out ->
-				logFiles.forEach { file ->
-					FileInputStream(file).use { input ->
-						val entry = ZipEntry(file.name)
-						out.putNextEntry(entry)
-
-						input.copyTo(out)
-						out.closeEntry()
-					}
-				}
-			}
-			return zipFile
-		} catch (e: IOException) {
-			Log.e(logTag, "Failed to zip logs", e)
-			return null
-		}
+		return zipFiles(logFiles, zipFile)
 	}
 
+	/**
+	 * Zips log files to public Downloads/YourSdkLogs for sharing outside app sandbox.
+	 * @return Zip file or null on error
+	 */
 	fun exportToExternalZippedPublic(context: Context): File? {
-		val logFiles = logDir?.listFiles { _, name ->
-			name.startsWith("sdk_log_") && name.endsWith(".txt")
-		} ?: return null
-
+		val logFiles = logDir?.listFiles { _, name -> name.startsWith("sdk_log_") && name.endsWith(".txt") } ?: return null
 		if (logFiles.isEmpty()) return null
+		val downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+		val zipFile = File(File(downloads, "YourSdkLogs").apply { mkdirs() }, "sdk_logs_${System.currentTimeMillis()}.zip")
+		return zipFiles(logFiles, zipFile)
+	}
 
-		val timeStamp = System.currentTimeMillis()
-		val zipFileName = "sdk_logs_$timeStamp.zip"
-		val sdkFolderName = "YourSdkLogs"
-
-		return try {
-			val outFile: File = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-				// Scoped storage: Downloads/YourSdkLogs/sdk_logs_*.zip
-				val downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-				val dir = File(downloads, sdkFolderName).apply { mkdirs() }
-				File(dir, zipFileName)
-			} else {
-				// Legacy public access (pre-Q)
-				val downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-				val dir = File(downloads, sdkFolderName).apply { mkdirs() }
-				File(dir, zipFileName)
-			}
-
-			ZipOutputStream(BufferedOutputStream(FileOutputStream(outFile))).use { out ->
-				logFiles.forEach { file ->
-					FileInputStream(file).use { input ->
-						val entry = ZipEntry(file.name)
-						out.putNextEntry(entry)
-						input.copyTo(out)
-						out.closeEntry()
-					}
+	/**
+	 * Helper to zip files to destination.
+	 * @return Zip file or null on error
+	 */
+	private fun zipFiles(files: Array<File>, zipFile: File): File? = try {
+		ZipOutputStream(BufferedOutputStream(FileOutputStream(zipFile))).use { out ->
+			files.forEach { file ->
+				FileInputStream(file).use { input ->
+					out.putNextEntry(ZipEntry(file.name))
+					input.copyTo(out)
+					out.closeEntry()
 				}
 			}
-
-			Log.i(logTag, "Zipped logs to: ${outFile.absolutePath}")
-			outFile
-		} catch (e: IOException) {
-			Log.e(logTag, "Failed to zip/export logs to shared storage", e)
-			null
 		}
-	}
+		zipFile
+	} catch (_: IOException) { null }
+
+	// -- Permission & Export Request Handling --
 
 	private const val REQUEST_CODE_EXPORT_LOGS = 1727
+	private var exportCallback: ((Boolean, File?) -> Unit)? = null
 
-	private var exportCallback: ((success: Boolean, file: File?) -> Unit)? = null
-
-	fun requestAndExportPublicLogs(
-		activity: Activity,
-		callback: (success: Boolean, file: File?) -> Unit
-	) {
+	/**
+	 * Request permission and export logs to public Downloads folder.
+	 * Calls callback(success, file) when done.
+	 */
+	fun requestAndExportPublicLogs(activity: Activity, callback: (Boolean, File?) -> Unit) {
 		exportCallback = callback
-
-		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-			// No permission needed
-			val result = exportToExternalZippedPublic(activity)
-			callback(result != null, result)
+		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q ||
+			ContextCompat.checkSelfPermission(activity, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED) {
+			callback(exportToExternalZippedPublic(activity) != null, exportToExternalZippedPublic(activity))
 		} else {
-			if (ContextCompat.checkSelfPermission(
-					activity,
-					Manifest.permission.WRITE_EXTERNAL_STORAGE
-				) == PackageManager.PERMISSION_GRANTED
-			) {
-				val result = exportToExternalZippedPublic(activity)
-				callback(result != null, result)
-			} else {
-				ActivityCompat.requestPermissions(
-					activity,
-					arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE),
-					REQUEST_CODE_EXPORT_LOGS
-				)
-			}
+			ActivityCompat.requestPermissions(
+				activity,
+				arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE),
+				REQUEST_CODE_EXPORT_LOGS
+			)
 		}
 	}
 
-	// Must be forwarded from Activity
-	fun onRequestPermissionsResult(
-		requestCode: Int,
-		permissions: Array<out String>,
-		grantResults: IntArray,
-		context: Context
-	) {
+	/**
+	 * Should be called from Activity's onRequestPermissionsResult.
+	 * Handles log export after permission grant.
+	 */
+	fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray, context: Context) {
 		if (requestCode == REQUEST_CODE_EXPORT_LOGS) {
 			if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-				val result = exportToExternalZippedPublic(context)
-				exportCallback?.invoke(result != null, result)
+				exportCallback?.invoke(exportToExternalZippedPublic(context) != null, exportToExternalZippedPublic(context))
 			} else {
 				exportCallback?.invoke(false, null)
 			}
@@ -348,54 +286,47 @@ object SdkLogger {
 		}
 	}
 
+	// -- Sharing & Email --
+
+	/**
+	 * Shares zipped logs using system share sheet.
+	 */
 	fun shareZippedLogs(context: Context) {
 		val zipFile = exportToExternalZipped(context) ?: return
-
-		val uri = FileProvider.getUriForFile(
-			context,
-			"${context.packageName}.provider",
-			zipFile
-		)
-
+		val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", zipFile)
 		val intent = Intent(Intent.ACTION_SEND).apply {
 			type = "application/zip"
 			putExtra(Intent.EXTRA_STREAM, uri)
 			addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
 			putExtra(Intent.EXTRA_SUBJECT, "SDK Logs")
 		}
-
 		context.startActivity(Intent.createChooser(intent, "Share logs via"))
 	}
 
-
-
+	/**
+	 * Shares all exported log files (uncompressed) using system share sheet.
+	 */
 	fun shareLogs(context: Context) {
-		val exportedFiles = SdkLogger.exportToExternal(context)
+		val exportedFiles = exportToExternal(context)
 		if (exportedFiles.isEmpty()) return
-
 		val uris = exportedFiles.map {
 			FileProvider.getUriForFile(context, "${context.packageName}.provider", it)
 		}
-
 		val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
 			type = "text/plain"
 			putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(uris))
 			addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
 			putExtra(Intent.EXTRA_SUBJECT, "YourSdk Logs")
 		}
-
 		context.startActivity(Intent.createChooser(intent, "Share logs"))
 	}
 
+	/**
+	 * Shares zipped logs via email to support address.
+	 */
 	fun emailZippedLogs(context: Context, supportEmail: String = "support@yoursdk.com") {
 		val zipFile = exportToExternalZipped(context) ?: return
-
-		val uri = FileProvider.getUriForFile(
-			context,
-			"${context.packageName}.provider",
-			zipFile
-		)
-
+		val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", zipFile)
 		val emailIntent = Intent(Intent.ACTION_SEND).apply {
 			type = "application/zip"
 			putExtra(Intent.EXTRA_EMAIL, arrayOf(supportEmail))
@@ -404,9 +335,6 @@ object SdkLogger {
 			putExtra(Intent.EXTRA_STREAM, uri)
 			addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
 		}
-
 		context.startActivity(Intent.createChooser(emailIntent, "Send logs via email"))
 	}
-
-
 }
